@@ -14,7 +14,9 @@ rover_data = {
     "m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0, "m5": 0.0, "m6": 0.0,
     "cmd_l": 0.0, "cmd_r": 0.0,
     "led_color": "OFF",
-    "power_limit": 0.0  # <--- CHANGED TO 0.0
+    "power_limit": 0.0,
+    "mode": "DRIVE",
+    "s1": 1500.0, "s2": 1500.0, "s3": 1500.0, "s4": 1500.0
 }
 
 try:
@@ -48,7 +50,7 @@ def controller_worker():
     joy = pygame.joystick.Joystick(0)
     joy.init()
     
-    power_limit = 0.0 # <--- CHANGED TO 0.0
+    power_limit = 0.0 
     
     lb_down, rb_down = False, False
     btn_a_down, btn_b_down, btn_x_down = False, False, False
@@ -57,22 +59,21 @@ def controller_worker():
     while True:
         pygame.event.pump()
         
-        # --- POWER LIMITER (Bumpers) ---
-        if joy.get_button(5) and not rb_down: # RB (Increase)
+        # --- POWER LIMITER ---
+        if joy.get_button(5) and not rb_down: # RB
             power_limit = min(1.0, power_limit + 0.10)
             rb_down = True
         elif not joy.get_button(5): rb_down = False
 
-        if joy.get_button(4) and not lb_down: # LB (Decrease)
+        if joy.get_button(4) and not lb_down: # LB
             power_limit = max(0.0, power_limit - 0.10)
             lb_down = True
         elif not joy.get_button(4): lb_down = False
         
-        # Update global state so website sees it
         rover_data["power_limit"] = power_limit
 
         # --- LED TOGGLE LOGIC ---
-        if joy.get_button(1) and not btn_b_down: # B (Red)
+        if joy.get_button(1) and not btn_b_down: # B
             if rover_data["led_color"] == "RED":
                 current_led_char = 'O'; rover_data["led_color"] = "OFF"
             else:
@@ -80,7 +81,7 @@ def controller_worker():
             btn_b_down = True
         elif not joy.get_button(1): btn_b_down = False
 
-        if joy.get_button(0) and not btn_a_down: # A (Green)
+        if joy.get_button(0) and not btn_a_down: # A
             if rover_data["led_color"] == "GREEN":
                 current_led_char = 'O'; rover_data["led_color"] = "OFF"
             else:
@@ -88,7 +89,7 @@ def controller_worker():
             btn_a_down = True
         elif not joy.get_button(0): btn_a_down = False
 
-        if joy.get_button(2) and not btn_x_down: # X (Blue)
+        if joy.get_button(2) and not btn_x_down: # X
             if rover_data["led_color"] == "BLUE":
                 current_led_char = 'O'; rover_data["led_color"] = "OFF"
             else:
@@ -96,34 +97,77 @@ def controller_worker():
             btn_x_down = True
         elif not joy.get_button(2): btn_x_down = False
 
-        # --- DRIVE MIXING ---
-        raw_rt = (joy.get_axis(5) + 1) / 2.0
-        raw_lt = (joy.get_axis(4) + 1) / 2.0
-        raw_turn = joy.get_axis(2)
+        # --- MODE MIXING ---
+        if rover_data["mode"] == "DRIVE":
+            raw_rt = (joy.get_axis(5) + 1) / 2.0
+            raw_lt = (joy.get_axis(4) + 1) / 2.0
+            raw_turn = joy.get_axis(2)
 
-        if raw_rt < 0.05: raw_rt = 0.0
-        if raw_lt < 0.05: raw_lt = 0.0
-        if abs(raw_turn) < 0.1: raw_turn = 0.0
+            if raw_rt < 0.05: raw_rt = 0.0
+            if raw_lt < 0.05: raw_lt = 0.0
+            if abs(raw_turn) < 0.1: raw_turn = 0.0
 
-        throttle = raw_rt - raw_lt
-        
-        # Invert the throttle to fix the forward/backward mapping
-        # Notice we use '-throttle' instead of 'throttle'
-        l_out = max(-1.0, min(1.0, (-throttle + raw_turn) * power_limit))
-        r_out = max(-1.0, min(1.0, (-throttle - raw_turn) * power_limit))
+            throttle = raw_rt - raw_lt
+            
+            rover_data["cmd_l"] = max(-1.0, min(1.0, (-throttle + raw_turn) * power_limit))
+            rover_data["cmd_r"] = max(-1.0, min(1.0, (-throttle - raw_turn) * power_limit))
 
-        rover_data["cmd_l"] = l_out
-        rover_data["cmd_r"] = r_out
+        elif rover_data["mode"] == "ARM":
+            speed_factor = 40.0 
+
+            # NEO 1 (Forward/Back) -> Left Joystick Y (Axis 1)
+            rover_data["cmd_l"] = -joy.get_axis(1) * power_limit
+            
+            # NEO 2 (Forward/Back) -> D-Pad Up/Down
+            if joy.get_numhats() > 0:
+                hat_y = joy.get_hat(0)[1]
+                rover_data["cmd_r"] = hat_y * power_limit
+            else:
+                rover_data["cmd_r"] = 0.0
+
+            # Servo 1 (Turntable) -> Left Joystick X (Axis 0)
+            if abs(joy.get_axis(0)) > 0.15: 
+                rover_data["s1"] += joy.get_axis(0) * speed_factor
+
+            # Servo 2 (Gripper) -> Triggers
+            rt = joy.get_axis(5)
+            lt = joy.get_axis(4)
+            if rt > -0.5: rover_data["s2"] += ((rt + 1.0) / 2.0) * speed_factor
+            if lt > -0.5: rover_data["s2"] -= ((lt + 1.0) / 2.0) * speed_factor
+
+            # Servo 3 (End Effector Rotation) -> D-Pad Left/Right
+            if joy.get_numhats() > 0:
+                hat_x = joy.get_hat(0)[0]
+                if hat_x > 0: rover_data["s3"] += speed_factor
+                elif hat_x < 0: rover_data["s3"] -= speed_factor
+
+            # Servo 4 (Wrist Pitch) -> Right Joystick Y (Axis 3)
+            if abs(joy.get_axis(3)) > 0.15: 
+                rover_data["s4"] += joy.get_axis(3) * speed_factor
+
+            # Clamp servos safely
+            rover_data["s1"] = max(500, min(2500, rover_data["s1"]))
+            rover_data["s2"] = max(500, min(2500, rover_data["s2"]))
+            rover_data["s3"] = max(500, min(2500, rover_data["s3"]))
+            rover_data["s4"] = max(500, min(2500, rover_data["s4"]))
 
         if ser and ser.is_open: 
             try:
-                msg = f"<{l_out:.2f},{r_out:.2f},{current_led_char}>\n"
+                m_char = 'D' if rover_data["mode"] == "DRIVE" else 'A'
+                msg = f"<{m_char},{rover_data['cmd_l']:.2f},{rover_data['cmd_r']:.2f},{int(rover_data['s1'])},{int(rover_data['s2'])},{int(rover_data['s3'])},{int(rover_data['s4'])},{current_led_char}>\n"
                 ser.write(msg.encode())
             except: pass
             
         time.sleep(0.05) 
 
 threading.Thread(target=controller_worker, daemon=True).start()
+
+@app.route('/api/set_mode/<mode>')
+def set_mode(mode):
+    global rover_data
+    if mode in ["DRIVE", "ARM"]:
+        rover_data["mode"] = mode
+    return jsonify({"status": "ok"})
 
 @app.route('/')
 def index(): return render_template('manual.html')
